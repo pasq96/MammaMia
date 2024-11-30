@@ -272,7 +272,7 @@ async def streaming_community(imdb,client,SC_FAST_SEARCH):
             return url,url720,quality,slug
     except Exception as e:
         print("MammaMia: StreamingCommunity failed",e)
-        return None,None,None
+        return None,None,None,None
 
 async def test_animeworld():
     from curl_cffi.requests import AsyncSession
