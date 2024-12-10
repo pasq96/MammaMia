@@ -4,10 +4,10 @@
              "domain": "family"
          },
          "Filmpertutti": {
-             "domain": "diy"
+             "domain": "team"
          },
          "Tantifilm":{
-             "domain": "bond"
+             "domain": "name"
          },
          "Mysterius":{
              "enabled": "0"    
