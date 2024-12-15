@@ -54,7 +54,7 @@ async def get_version(client):
         return "65e52dcf34d64173542cd2dc6b8bb75b"
 
 async def get_film(tid, version, client):
-    headers = generate_headers("https://streamingcommunity.buzz/", "https://streamingcommunity.buzz", version)
+    headers = generate_headers("https://streamingcommunity.family/", "https://streamingcommunity.family", version)
     iframe_url = f'https://streamingcommunity.{SC_DOMAIN}/iframe/{tid}'
     response = await client.get(iframe_url, headers=headers, allow_redirects=True, impersonate="chrome120")
     iframe_src_tag = BeautifulSoup(response.text, "lxml").find("iframe")
@@ -95,7 +95,7 @@ async def extract_stream_data(iframe_url, client, headers):
         raise ValueError("Script tag not found in iframe response")
 
 async def get_season_episode_id(tid, slug, season, episode, version, client):
-    headers = generate_headers("https://streamingcommunity.buzz/", "https://streamingcommunity.buzz", version)
+    headers = generate_headers("https://streamingcommunity.family/", "https://streamingcommunity.family", version)
     response = await client.get(f'https://streamingcommunity.{SC_DOMAIN}/titles/{tid}-{slug}/stagione-{season}', headers=headers, allow_redirects=True, impersonate="chrome120")
     episodes = response.json().get('props', {}).get('loadedSeason', {}).get('episodes', [])
     if not episodes:
