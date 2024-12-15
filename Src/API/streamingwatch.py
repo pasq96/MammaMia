@@ -1,4 +1,3 @@
-
 from bs4 import BeautifulSoup, SoupStrainer
 from Src.Utilities.convert import get_TMDb_id_from_IMDb_id
 from Src.Utilities.info import get_info_tmdb, is_movie
@@ -10,15 +9,15 @@ from functools import lru_cache
 
 SW_DOMAIN = config.SW_DOMAIN
 
-# Cache for repeated data
+# Cache per dati ripetuti
 nonce_cache = {}
 
-# Precompiled regular expressions for better performance
+# Espressioni regolari precompilate per migliori performance
 PATTERN_WPONCE = re.compile(r'"admin_ajax_nonce":"(\w+)"')
 PATTERN_HLS_URL = re.compile(r'sources:\s*\[\s*\{\s*file\s*:\s*"([^"]*)"')
 PATTERN_SRC = re.compile(r'src="([^"]+)"')
 
-# Generate standard headers
+# Genera gli header standard per le richieste HTTP
 def generate_headers():
     return {
         'authority': f'www.streamingwatch.{SW_DOMAIN}',
@@ -37,15 +36,15 @@ def generate_headers():
         'x-requested-with': 'XMLHttpRequest',
     }
 
-# LRU cache for category and episode data
+# Cache LRU per dati di categoria ed episodi
 @lru_cache(maxsize=50)
 async def wponce_get(client):
     if "wponce" in nonce_cache:
         return nonce_cache["wponce"]
     response = await client.get(f"https://www.streamingwatch.{SW_DOMAIN}/contatto/")
     matches = PATTERN_WPONCE.findall(response.text)
-    if not matches:
-        raise ValueError("Nonce not found in response")
+    if not matches or len(matches) < 2:
+        raise ValueError("Nonce not found in response or index out of range")
     nonce_cache["wponce"] = matches[1]
     return matches[1]
 
@@ -54,37 +53,45 @@ async def fetch_category_id(showname, client):
     url = f'https://streamingwatch.{SW_DOMAIN}/wp-json/wp/v2/categories?search={showname}&_fields=id'
     response = await client.get(url, allow_redirects=True, impersonate="chrome120")
     data = json.loads(response.text)
-    if not data:
-        raise ValueError("Category ID not found")
+    if not data or len(data) < 1:
+        raise ValueError(f"Category ID not found for {showname}")
     return data[0]['id']
 
 async def search(showname, season, episode, date, ismovie, client):
     headers = generate_headers()
-    if ismovie == 1:
-        wponce = await wponce_get(client)
-        data = {'action': 'data_fetch', 'keyword': showname, '_wpnonce': wponce}
-        query = f'https://www.streamingwatch.{SW_DOMAIN}/wp-admin/admin-ajax.php'
-        
-        response = await client.post(query, headers=headers, data=data)
-        soup = BeautifulSoup(response.content, 'lxml')
-        page_date = soup.find(id='search-cat-year').text.strip()
-        
-        if page_date == date:
-            href = soup.find('a')['href']
-            response = await client.get(href, allow_redirects=True, impersonate="chrome120")
-            iframe = BeautifulSoup(response.text, 'lxml', parse_only=SoupStrainer('iframe')).find('iframe')
-            return iframe.get('data-lazy-src')
-    elif ismovie == 0:
-        category_id = await fetch_category_id(showname, client)
-        query = f'https://streamingwatch.{SW_DOMAIN}/wp-json/wp/v2/posts?categories={category_id}&per_page=100'
-        response = await client.get(query, allow_redirects=True, impersonate="chrome120")
-        
-        for entry in json.loads(response.text):
-            slug = entry["slug"]
-            if f"stagione-{season}-episodio-{episode}" in slug and f"episodio-{episode}0" not in slug:
-                match = PATTERN_SRC.search(entry["content"]["rendered"])
-                if match:
-                    return match.group(1)
+    try:
+        if ismovie == 1:
+            wponce = await wponce_get(client)
+            data = {'action': 'data_fetch', 'keyword': showname, '_wpnonce': wponce}
+            query = f'https://www.streamingwatch.{SW_DOMAIN}/wp-admin/admin-ajax.php'
+            
+            response = await client.post(query, headers=headers, data=data)
+            soup = BeautifulSoup(response.content, 'lxml')
+            page_date = soup.find(id='search-cat-year').text.strip()
+
+            if page_date == date:
+                href = soup.find('a')['href']
+                response = await client.get(href, allow_redirects=True, impersonate="chrome120")
+                iframe = BeautifulSoup(response.text, 'lxml', parse_only=SoupStrainer('iframe')).find('iframe')
+                return iframe.get('data-lazy-src')
+        elif ismovie == 0:
+            category_id = await fetch_category_id(showname, client)
+            query = f'https://streamingwatch.{SW_DOMAIN}/wp-json/wp/v2/posts?categories={category_id}&per_page=100'
+            response = await client.get(query, allow_redirects=True, impersonate="chrome120")
+            
+            data = json.loads(response.text)
+            if not data:
+                raise ValueError(f"No posts found for category {showname}")
+
+            for entry in data:
+                slug = entry.get("slug", "")
+                if f"stagione-{season}-episodio-{episode}" in slug and f"episodio-{episode}0" not in slug:
+                    match = PATTERN_SRC.search(entry["content"]["rendered"])
+                    if match:
+                        return match.group(1)
+    except Exception as e:
+        print(f"Error during search: {e}")
+        return None
 
 async def hls_url(hdplayer, client):
     response = await client.get(hdplayer, allow_redirects=True, impersonate="chrome120")
@@ -95,18 +102,25 @@ async def hls_url(hdplayer, client):
 
 async def streamingwatch(imdb, client):
     try:
+        # Determine if content is a movie or a series
         ismovie, imdb_id, season, episode = is_movie(imdb)
         type = "StreamingWatch"
         
+        # Get TMDb ID if needed
         tmdba = await get_TMDb_id_from_IMDb_id(imdb_id, client) if "tt" in imdb else imdb_id
         showname, date = get_info_tmdb(tmdba, ismovie, type)
         showname = urllib.parse.quote_plus(showname.replace(" ", "+").replace("–", "+").replace("—", "+"))
         
+        # Search and get player URL
         hdplayer = await search(showname, season, episode, date, ismovie, client)
+        if not hdplayer:
+            print(f"No player found for {showname}")
+            return None
+        
         url = await hls_url(hdplayer, client)
         
-        print(f"MammaMia: StreamingWatch found results for {showname}")
+        print(f"StreamingWatch found results for {showname}")
         return url
     except Exception as e:
-        print("MammaMia: StreamingWatch Failed", e)
+        print(f"StreamingWatch failed: {e}")
         return None
