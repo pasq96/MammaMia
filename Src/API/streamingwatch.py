@@ -12,7 +12,7 @@ SW_DOMAIN = config.SW_DOMAIN
 # Cache per dati ripetuti
 nonce_cache = {}
 
-# Espressioni regolari precompilate per migliori performance
+# Espressioni regolari precompilate
 PATTERN_WPONCE = re.compile(r'"admin_ajax_nonce":"(\w+)"')
 PATTERN_HLS_URL = re.compile(r'sources:\s*\[\s*\{\s*file\s*:\s*"([^"]*)"')
 PATTERN_SRC = re.compile(r'src="([^"]+)"')
@@ -36,27 +36,33 @@ def generate_headers():
         'x-requested-with': 'XMLHttpRequest',
     }
 
-# Cache LRU per dati di categoria ed episodi
+# Cache LRU per la nonce
 @lru_cache(maxsize=50)
 async def wponce_get(client):
     if "wponce" in nonce_cache:
         return nonce_cache["wponce"]
+    
     response = await client.get(f"https://www.streamingwatch.{SW_DOMAIN}/contatto/")
     matches = PATTERN_WPONCE.findall(response.text)
     if not matches or len(matches) < 2:
         raise ValueError("Nonce not found in response or index out of range")
+    
     nonce_cache["wponce"] = matches[1]
     return matches[1]
 
+# Cache LRU per ottenere l'ID della categoria
 @lru_cache(maxsize=100)
 async def fetch_category_id(showname, client):
     url = f'https://streamingwatch.{SW_DOMAIN}/wp-json/wp/v2/categories?search={showname}&_fields=id'
     response = await client.get(url, allow_redirects=True, impersonate="chrome120")
     data = json.loads(response.text)
+    
     if not data or len(data) < 1:
         raise ValueError(f"Category ID not found for {showname}")
+    
     return data[0]['id']
 
+# Funzione per cercare il player URL
 async def search(showname, season, episode, date, ismovie, client):
     headers = generate_headers()
     try:
@@ -74,6 +80,7 @@ async def search(showname, season, episode, date, ismovie, client):
                 response = await client.get(href, allow_redirects=True, impersonate="chrome120")
                 iframe = BeautifulSoup(response.text, 'lxml', parse_only=SoupStrainer('iframe')).find('iframe')
                 return iframe.get('data-lazy-src')
+        
         elif ismovie == 0:
             category_id = await fetch_category_id(showname, client)
             query = f'https://streamingwatch.{SW_DOMAIN}/wp-json/wp/v2/posts?categories={category_id}&per_page=100'
@@ -93,32 +100,38 @@ async def search(showname, season, episode, date, ismovie, client):
         print(f"Error during search: {e}")
         return None
 
+# Funzione per ottenere l'URL HLS
 async def hls_url(hdplayer, client):
     if hdplayer is None:
         raise ValueError("Received None as hdplayer, cannot fetch HLS URL")
+    
     response = await client.get(hdplayer, allow_redirects=True, impersonate="chrome120")
     match = PATTERN_HLS_URL.search(response.text)
     if not match:
         raise ValueError("HLS URL not found in player source")
+    
     return match.group(1)
 
+# Funzione principale di streamingwatch
+@lru_cache(maxsize=100)
 async def streamingwatch(imdb, client):
     try:
-        # Determine if content is a movie or a series
+        # Determina se il contenuto è un film o una serie
         ismovie, imdb_id, season, episode = is_movie(imdb)
         type = "StreamingWatch"
         
-        # Get TMDb ID if needed
+        # Ottieni TMDb ID se necessario
         tmdba = await get_TMDb_id_from_IMDb_id(imdb_id, client) if "tt" in imdb else imdb_id
-        showname, date = get_info_tmdb(tmdba, ismovie, type)
+        showname, date = await get_info_tmdb(tmdba, ismovie, type)
         
-        # Ensure showname is not None
-        if showname is None:
-            raise ValueError("showname is None, cannot proceed")
+        # Verifica che showname non sia None
+        if not showname:
+            raise ValueError("showname is None or empty")
         
+        # Prepara showname per l'URL
         showname = urllib.parse.quote_plus(showname.replace(" ", "+").replace("–", "+").replace("—", "+"))
         
-        # Search and get player URL
+        # Cerca e ottieni l'URL del player
         hdplayer = await search(showname, season, episode, date, ismovie, client)
         if not hdplayer:
             print(f"No player found for {showname}")
