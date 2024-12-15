@@ -94,6 +94,8 @@ async def search(showname, season, episode, date, ismovie, client):
         return None
 
 async def hls_url(hdplayer, client):
+    if hdplayer is None:
+        raise ValueError("Received None as hdplayer, cannot fetch HLS URL")
     response = await client.get(hdplayer, allow_redirects=True, impersonate="chrome120")
     match = PATTERN_HLS_URL.search(response.text)
     if not match:
@@ -109,6 +111,11 @@ async def streamingwatch(imdb, client):
         # Get TMDb ID if needed
         tmdba = await get_TMDb_id_from_IMDb_id(imdb_id, client) if "tt" in imdb else imdb_id
         showname, date = get_info_tmdb(tmdba, ismovie, type)
+        
+        # Ensure showname is not None
+        if showname is None:
+            raise ValueError("showname is None, cannot proceed")
+        
         showname = urllib.parse.quote_plus(showname.replace(" ", "+").replace("–", "+").replace("—", "+"))
         
         # Search and get player URL
