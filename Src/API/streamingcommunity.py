@@ -1,4 +1,7 @@
 from bs4 import BeautifulSoup
+from Src.Utilities.convert import get_TMDb_id_from_IMDb_id
+from Src.Utilities.info import get_info_tmdb, is_movie, get_info_imdb
+import Src.Utilities.config as config
 import json
 import random
 import re
