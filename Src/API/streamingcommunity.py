@@ -9,167 +9,103 @@ from urllib.parse import urlparse, parse_qs, quote_plus
 from fake_headers import Headers
 from Src.Utilities.loadenv import load_env
 
-# Load environment variables
+# Caricamento variabili
 env_vars = load_env()
 SC_DOMAIN = config.SC_DOMAIN
 Public_Instance = config.Public_Instance
-Alternative_Link = env_vars.get('ALTERNATIVE_LINK')
+Alternative_Link = env_vars.get("ALTERNATIVE_LINK")
 headers = Headers()
 
-# Utility function to generate headers
-def generate_headers():
-    random_headers = headers.generate()
-    random_headers.update({
-        'Referer': f"https://streamingcommunity.{SC_DOMAIN}/",
-        'Origin': f"https://streamingcommunity.{SC_DOMAIN}",
-        'Accept': 'application/json',
-        'Content-Type': 'application/json'
-    })
-    return random_headers
-
-# Get version of Streaming Community
 async def get_version(client):
     try:
-        response = await client.get(
-            f'https://streamingcommunity.{SC_DOMAIN}/richiedi-un-titolo',
-            headers=generate_headers(), allow_redirects=True, impersonate="chrome120"
-        )
+        base_url = f'https://streamingcommunity.{SC_DOMAIN}/richiedi-un-titolo'
+        response = await client.get(base_url, headers=headers.generate(), allow_redirects=True, impersonate="chrome120")
         soup = BeautifulSoup(response.text, "lxml")
         version = json.loads(soup.find("div", {"id": "app"}).get("data-page"))['version']
         return version
     except Exception:
         return "65e52dcf34d64173542cd2dc6b8bb75b"
 
-# Search for the title async
-def extract_tid_slug_type(item):
-    tid, slug, type = item['id'], item['slug'], 0 if item['type'] == "tv" else 1
-    return tid, slug, type
-
-async def search(query, ismovie, client, SC_FAST_SEARCH, movie_id):
-    try:
-        response = await client.get(query, headers=generate_headers(), allow_redirects=True)
-        for item in response.json()['data']:
-            tid, slug, type = extract_tid_slug_type(item)
-            if type == ismovie:
-                if SC_FAST_SEARCH == "0":
-                    data, version = await fetch_title_data(client, tid, slug)
-                    if validate_tmdb_id(movie_id, data):
-                        return tid, slug, version
-                else:
-                    version = await get_version(client)
-                    return tid, slug, version
-    except Exception as e:
-        print("Search failed:", e)
+async def search(query, date, ismovie, client, SC_FAST_SEARCH, movie_id):
+    response = await client.get(query, headers=headers.generate(), allow_redirects=True)
+    if response.status_code != 200:
+        return None, None, None
+    
+    for item in response.json().get('data', []):
+        if (type := 0 if item['type'] == "tv" else 1) == ismovie:
+            tid, slug = item['id'], item['slug']
+            if SC_FAST_SEARCH == "0":
+                response = await client.get(f'https://streamingcommunity.{SC_DOMAIN}/titles/{tid}-{slug}', headers=headers.generate(), allow_redirects=True, impersonate="chrome120")
+                data = json.loads(BeautifulSoup(response.text, "lxml").find("div", {"id": "app"}).get("data-page"))
+                if str(data['props']['title']['tmdb_id']) == movie_id:
+                    return tid, slug, data['version']
+            else:
+                return tid, slug, await get_version(client)
     return None, None, None
 
-async def fetch_title_data(client, tid, slug):
-    response = await client.get(f'https://streamingcommunity.{SC_DOMAIN}/titles/{tid}-{slug}',
-                                headers=generate_headers(), allow_redirects=True, impersonate="chrome120")
-    data = json.loads(BeautifulSoup(response.text, "lxml").find("div", {"id": "app"}).get("data-page"))
-    return data, data['version']
-
-def validate_tmdb_id(movie_id, data):
-    return str(data['props']['title']['tmdb_id']) == str(movie_id)
-
-# Fetch streaming URLs
 async def get_film(tid, version, client):
-    iframe_src, vixid, query_params = await fetch_iframe_data(tid, version, client)
-    token, expires, quality = await fetch_token_data(client, iframe_src)
-    return build_streaming_urls(vixid, expires, token, query_params, quality)
+    url = f'https://streamingcommunity.{SC_DOMAIN}/iframe/{tid}'
+    iframe_response = await client.get(url, headers=headers.generate(), allow_redirects=True, impersonate="chrome120")
+    iframe_src = BeautifulSoup(iframe_response.text, 'lxml').find('iframe')['src']
+    vixid, query_params = iframe_src.split("/embed/")[1].split("?")[0], parse_qs(urlparse(iframe_src).query)
 
-async def fetch_iframe_data(tid, version, client):
-    response = await client.get(f'https://streamingcommunity.{SC_DOMAIN}/iframe/{tid}',
-                                headers=generate_headers(), allow_redirects=True, impersonate="chrome120")
-    iframe_src = BeautifulSoup(response.text, 'lxml').find('iframe').get("src")
-    parsed_url = urlparse(iframe_src)
-    return iframe_src, iframe_src.split("/embed/")[1].split("?")[0], parse_qs(parsed_url.query)
-
-async def fetch_token_data(client, iframe_src):
-    response = await client.get(iframe_src, headers=generate_headers(), allow_redirects=True, impersonate="chrome120")
-    script = BeautifulSoup(response.text, "lxml").find("body").find("script").text
-    token = re.search(r"'token':\s*'(\w+)'", script).group(1)
-    expires = re.search(r"'expires':\s*'(\d+)'", script).group(1)
+    resp = await client.get(iframe_src, headers=headers.generate(), allow_redirects=True, impersonate="chrome120")
+    script = BeautifulSoup(resp.text, "lxml").find("body").find("script").text
+    token, expires = re.search(r"'token':\s*'(\w+)'", script).group(1), re.search(r"'expires':\s*'(\d+)'", script).group(1)
     quality = re.search(r'"quality":(\d+)', script).group(1)
-    return token, expires, quality
 
-def build_streaming_urls(vixid, expires, token, query_params, quality):
-    base_url = f'https://vixcloud.co/playlist/{vixid}.m3u8?expires={expires}&token={token}'
-    if quality == "1080" and 'canPlayFHD' in query_params:
+    base_url = f'https://vixcloud.co/playlist/{vixid}.m3u8?expires={expires}'
+    if 'canPlayFHD' in query_params:
         base_url += "&h=1"
     elif 'b' in query_params:
         base_url += "&b=1"
-    return base_url, f'https://vixcloud.co/playlist/{vixid}.m3u8', quality
 
-async def get_episode_id(tid, slug, season, episode, version, client):
-    """
-    Ottiene l'ID di un episodio specifico basato su stagione ed episodio.
-    """
-    try:
-        # Effettua una richiesta per recuperare i dati della serie TV
-        response = await client.get(
-            f'https://streamingcommunity.{SC_DOMAIN}/titles/{tid}-{slug}',
-            headers=generate_headers(), allow_redirects=True, impersonate="chrome120"
-        )
-        data = json.loads(BeautifulSoup(response.text, "lxml").find("div", {"id": "app"}).get("data-page"))
-        
-        # Estrae gli episodi dalla stagione specificata
-        seasons = data['props']['title']['seasons']
-        season_data = seasons.get(str(season))  # La chiave è la stringa del numero della stagione
+    if quality == "1080" and "&b=1" in base_url:
+        base_url = base_url.replace("&b=1", "&h=1")
+    return base_url + f"&token={token}", f'https://vixcloud.co/playlist/{vixid}.m3u8', quality
 
-        if not season_data:
-            print(f"Stagione {season} non trovata.")
-            return None
-        
-        # Cerca l'episodio con il numero corretto
-        for ep in season_data['episodes']:
-            if ep['number'] == episode:
-                return ep['id']  # Restituisce l'ID dell'episodio
-        
-        print(f"Episodio {episode} non trovato nella stagione {season}.")
-    except Exception as e:
-        print("Errore nel recupero dell'ID episodio:", e)
-    
+async def get_season_episode_id(tid, slug, season, episode, version, client):
+    url = f'https://streamingcommunity.{SC_DOMAIN}/titles/{tid}-{slug}/stagione-{season}'
+    episodes = (await client.get(url, headers=headers.generate(), impersonate="chrome120")).json()
+    for e in episodes.get('props', {}).get('loadedSeason', {}).get('episodes', []):
+        if e['number'] == episode:
+            return e['id']
     return None
 
+async def get_episode_link(episode_id, tid, version, client):
+    url = f'https://streamingcommunity.{SC_DOMAIN}/iframe/{tid}'
+    params = {'episode_id': episode_id, 'next_episode': '1'}
+    iframe_src = BeautifulSoup((await client.get(url, params=params, headers=headers.generate(), impersonate="chrome120")).text, "lxml").find("iframe")['src']
 
+    vixid, query_params = iframe_src.split("/embed/")[1].split("?")[0], parse_qs(urlparse(iframe_src).query)
+    script = BeautifulSoup((await client.get(iframe_src, headers=headers.generate(), impersonate="chrome120")).text, "lxml").find("body").find("script").text
+    token, expires = re.search(r"'token':\s*'(\w+)'", script).group(1), re.search(r"'expires':\s*'(\d+)'", script).group(1)
+    quality = re.search(r'"quality":(\d+)', script).group(1)
 
-# Streaming Community Main Function
+    base_url = f'https://vixcloud.co/playlist/{vixid}.m3u8?expires={expires}'
+    if 'canPlayFHD' in query_params:
+        base_url += "&h=1"
+    elif 'b' in query_params:
+        base_url += "&b=1"
+
+    return base_url + f"&token={token}", f'https://vixcloud.co/playlist/{vixid}.m3u8', quality
+
 async def streaming_community(imdb, client, SC_FAST_SEARCH):
     try:
         if Public_Instance == "1":
-            return await fetch_public_instance(client, SC_FAST_SEARCH, imdb)
+            link_post = random.choice(json.loads(Alternative_Link))
+            response = await client.get(f"{link_post}fetch-data/{SC_FAST_SEARCH}/{SC_DOMAIN}/{imdb}")
+            return response.headers.get('x-url-streaming-community'), response.headers.get('x-url-720-streaming-community'), response.headers.get('x-quality-sc')
 
-        ismovie, imdb_id, season, episode = parse_imdb_data(imdb)
-        showname, date = await get_show_info(SC_FAST_SEARCH, ismovie, imdb_id, client)
-        tid, slug, version = await search(build_query(showname), ismovie, client, SC_FAST_SEARCH, imdb_id)
+        ismovie, imdb_id, season, episode = is_movie(imdb)
+        showname, date = (await get_info_imdb(imdb_id, ismovie, "StreamingCommunityFS", client), None) if "tt" in imdb else get_info_tmdb(imdb_id.replace("tmdb:", ""), ismovie, "StreamingCommunityFS")
+        tid, slug, version = await search(f'https://streamingcommunity.{SC_DOMAIN}/api/search?q={quote_plus(showname)}', date, ismovie, client, SC_FAST_SEARCH, imdb_id)
 
         if ismovie:
             return await get_film(tid, version, client)
         else:
-            episode_id = await get_episode_id(tid, slug, season, episode, version, client)
+            episode_id = await get_season_episode_id(tid, slug, season, episode, version, client)
             return await get_episode_link(episode_id, tid, version, client)
     except Exception as e:
         print("StreamingCommunity failed:", e)
-    return None, None, None, None
-
-def build_query(showname):
-    return f'https://streamingcommunity.{SC_DOMAIN}/api/search?q={quote_plus(showname)}'
-
-def parse_imdb_data(imdb):
-    general = is_movie(imdb)
-    return general[0], general[1], int(general[2] or 0), int(general[3] or 0)
-
-async def get_show_info(SC_FAST_SEARCH, ismovie, imdb_id, client):
-    type = "StreamingCommunityFS" if SC_FAST_SEARCH == "1" else "StreamingCommunity"
-    if "tt" in imdb_id:
-        return await get_info_imdb(imdb_id, ismovie, type, client), None
-    else:
-        tmdba = imdb_id.replace("tmdb:", "")
-        return get_info_tmdb(tmdba, ismovie, type)
-
-async def fetch_public_instance(client, SC_FAST_SEARCH, imdb):
-    link_post = random.choice(json.loads(Alternative_Link))
-    response = await client.get(f"{link_post}fetch-data/{SC_FAST_SEARCH}/{SC_DOMAIN}/{imdb}")
-    return response.headers.get('x-url-streaming-community'), \
-           response.headers.get('x-url-720-streaming-community'), \
-           response.headers.get('x-quality-sc')
+        return None, None, None
